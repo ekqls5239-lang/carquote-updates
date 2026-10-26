@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release edit v1.0.46 --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
-          gh release view v1.0.46 --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,isLatest,assets > /tmp/promoted.json
+          gh release view v1.0.46 --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,assets > /tmp/promoted.json
           python3 - <<'PY'
           import json
           o=json.load(open('/tmp/promoted.json'))
