@@ -1,0 +1,99 @@
+name: Upload verified KS Windows builds
+
+on:
+  push:
+    branches: [main]
+    paths: ['release-manifest.json']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish SHA-checked Windows EXE via signed artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read release manifest, skip disabled drafts
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          m=json.loads(Path('release-manifest.json').read_text())
+          if m.get('enabled') is not True:
+              print('Release upload is disabled. No action taken.')
+              with open(os.environ['GITHUB_OUTPUT'],'a') as out:out.write('enabled=false\n')
+              raise SystemExit(0)
+          assert re.fullmatch(r'v1\.0\.[0-9]+-rc[0-9]+',m['tag']), 'Only prereleases, never implicit employee rollout'
+          assert m['artifact_zip_url'].startswith('https://'), 'Only HTTPS artifact URL'
+          for name in ('carquote_sha256','updater_sha256'):
+              assert re.fullmatch('[0-9a-fA-F]{64}',m[name]),name
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write('enabled=true\n')
+              out.write('tag='+m['tag']+'\n')
+          print('Verified candidate tag',m['tag'])
+          PY
+      - name: Download original verified Windows artifact
+        if: steps.manifest.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          m=json.load(open('release-manifest.json'))
+          with open('/tmp/ks-artifact-url','w') as out:out.write(m['artifact_zip_url'])
+          PY
+          URL="$(cat /tmp/ks-artifact-url)"
+          curl --fail --silent --show-error --location --retry 2 --connect-timeout 25 --max-time 1500 "$URL" -o /tmp/ks-artifact.zip
+          test "$(wc -c </tmp/ks-artifact.zip)" -gt 150000000
+          unzip -tq /tmp/ks-artifact.zip
+          mkdir -p dist
+          cd dist
+          unzip -oq /tmp/ks-artifact.zip CarQuoteManager.exe Updater.exe SHA256.txt
+      - name: Verify main EXE and updater checksums
+        if: steps.manifest.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,hashlib,pathlib
+          m=json.load(open('release-manifest.json'))
+          expected={'CarQuoteManager.exe':m['carquote_sha256'].upper(),
+                    'Updater.exe':m['updater_sha256'].upper()}
+          declared=(pathlib.Path('dist')/'SHA256.txt').read_text(encoding='utf-8-sig')
+          for filename,sha in expected.items():
+              p=pathlib.Path('dist')/filename
+              with p.open('rb') as f: assert f.read(2)==b'MZ'
+              with p.open('rb') as f: h=hashlib.file_digest(f,'sha256').hexdigest().upper()
+              assert h==sha, f'{filename} failed SHA-256 verification'
+              assert filename in declared and sha in declared
+              print(filename,h,p.stat().st_size)
+          PY
+      - name: Publish private-QA-approved candidate to public GitHub prerelease
+        if: steps.manifest.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.manifest.outputs.tag }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists, refusing to replace: $TAG"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json
+          m=json.load(open('release-manifest.json'))
+          with open('/tmp/ks-release-notes','w') as f:
+              f.write(m['notes']+'\nCarQuoteManager SHA-256: '+m['carquote_sha256']+'\n')
+          PY
+          TITLE="$(python3 -c 'import json;print(json.load(open("release-manifest.json"))["release_title"])')"
+          gh release create "$TAG" dist/CarQuoteManager.exe dist/Updater.exe dist/SHA256.txt \
+             --repo "$GITHUB_REPOSITORY" --target main --prerelease \
+             --title "$TITLE" --notes-file /tmp/ks-release-notes
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
