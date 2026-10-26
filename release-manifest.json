@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "tag": "v1.0.46-rc1",
+  "artifact_zip_url": "",
+  "carquote_sha256": "AD0436CB37E2797F01B237FC79F40C916E594F51F9376F82B80D9F0C176ED644",
+  "updater_sha256": "B273799152F5F5762872180DF6C28B55F7D5852A4AE3EAF511596D5D1B9B0A00",
+  "release_title": "KS오토트레이딩 46빌드 확인용",
+  "notes": "검증된 KS오토트레이딩 Windows 업데이트 테스트 빌드입니다. 직원 자동 업데이트는 별도 승인 후 적용합니다."
+}
