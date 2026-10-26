@@ -1,0 +1,50 @@
+name: Finalize KS v1.0.46 production release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/finalize-v46-production.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    name: Promote v1.0.46 from staged prerelease to latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA256_MAIN: AD0436CB37E2797F01B237FC79F40C916E594F51F9376F82B80D9F0C176ED644
+    steps:
+      - name: Validate staged v46 asset and release state
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view v1.0.46 --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,assets > /tmp/staged-release.json
+          python3 - <<'PY'
+          import json,os
+          data=json.load(open('/tmp/staged-release.json'))
+          assert data['tagName']=='v1.0.46'
+          assets={a['name']:a for a in data['assets']}
+          for name in ('CarQuoteManager.exe','Updater.exe','SHA256.txt'):
+              assert name in assets, f'Required release asset missing: {name}'
+          assert int(assets['CarQuoteManager.exe']['size'])==186273792, 'Unexpected EXE byte size'
+          PY
+          mkdir -p check
+          gh release download v1.0.46 --repo "$GITHUB_REPOSITORY" --pattern SHA256.txt --dir check
+          grep -i "$SHA256_MAIN" check/SHA256.txt
+      - name: Promote tested v46 binary to latest formal GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit v1.0.46 --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+          gh release view v1.0.46 --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,isLatest,assets > /tmp/promoted.json
+          python3 - <<'PY'
+          import json
+          o=json.load(open('/tmp/promoted.json'))
+          assert o['tagName']=='v1.0.46' and o['isPrerelease'] is False
+          print('46 latest released; staff version handled separately by Supabase app_updates')
+          PY
