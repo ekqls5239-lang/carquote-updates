@@ -1,0 +1,69 @@
+name: Publish KS 46 verified EXE candidate
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v46-verified.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Download, checksum, upload v1.0.46-rc1
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ZIP_URL: 'https://sdmntprkoreacentral.oaiusercontent.com/files/00000000-36dc-8206-af63-c345b0f04c09/raw?se=2026-10-26T06%3A43%3A12Z&sp=r&sv=2026-02-06&sr=b&scid=44ed50f7-15c4-58d5-b692-3c00e2a752ae&skoid=0b778285-7b0b-4cdc-ac3b-fb93e8c3686f&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-10-25T22%3A03%3A57Z&ske=2026-10-26T22%3A03%3A57Z&sks=b&skv=2026-02-06&sig=ov0Mo/L62h0ibHDMf7AWY6goNqg8DFH9edc3icfyJOg%3D'
+    steps:
+      - name: Fetch signed completed Windows EXE ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 2 --connect-timeout 25 --max-time 1200 "$ZIP_URL" -o /tmp/ks46.zip
+          test "$(wc -c </tmp/ks46.zip)" -gt 150000000
+          unzip -tq /tmp/ks46.zip
+          mkdir -p publish
+          cd publish
+          unzip -oq /tmp/ks46.zip CarQuoteManager.exe Updater.exe SHA256.txt RELEASE_CANDIDATE.txt
+      - name: Confirm original EXE SHA-256 and PE header before public upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib,hashlib
+          root=pathlib.Path('publish')
+          hashes={'CarQuoteManager.exe':'AD0436CB37E2797F01B237FC79F40C916E594F51F9376F82B80D9F0C176ED644',
+                  'Updater.exe':'B273799152F5F5762872180DF6C28B55F7D5852A4AE3EAF511596D5D1B9B0A00'}
+          manifest=(root/'SHA256.txt').read_text(encoding='utf-8-sig')
+          for name,expected in hashes.items():
+              path=root/name
+              with open(path,'rb') as fh: assert fh.read(2)==b'MZ',f'{name} is not Windows PE'
+              with open(path,'rb') as fh: actual=hashlib.file_digest(fh,'sha256').hexdigest().upper()
+              assert actual==expected,(name,actual,expected)
+              assert name in manifest and actual in manifest
+              print('CHECKED SHA-256',name,actual,'BYTES',path.stat().st_size)
+          assert 'v1.0.46' in (root/'RELEASE_CANDIDATE.txt').read_text()
+          PY
+      - name: Publish SHA-verified GitHub prerelease, never replace v1.0.45
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG='v1.0.46-rc1'
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Existing v1.0.46-rc1 release; refusing overwrite.'
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
+            exit 0
+          fi
+          printf '%s\n' \
+            'KS오토트레이딩 46빌드 (v1.0.46) 검증된 배포 후보.' \
+            '기존 1.0.45 화면 스타일, 오늘 날짜 선택, 광고 문의 장부, 계약금 송금 문구 개선.' \
+            '이 릴리스는 확인용 사전 릴리스입니다. 직원 자동 업데이트는 활성화하지 않았습니다.' \
+            'CarQuoteManager.exe SHA-256: AD0436CB37E2797F01B237FC79F40C916E594F51F9376F82B80D9F0C176ED644' \
+            > /tmp/ks46_notes.txt
+          gh release create "$TAG" publish/CarQuoteManager.exe publish/Updater.exe publish/SHA256.txt \
+            --repo "$GITHUB_REPOSITORY" --target main --prerelease \
+            --title 'KS오토트레이딩 46빌드 확인용' --notes-file /tmp/ks46_notes.txt
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
