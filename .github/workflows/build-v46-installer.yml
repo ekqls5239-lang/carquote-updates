@@ -1,0 +1,165 @@
+name: KS 46 Windows single EXE installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'installer/KS_CarQuote_v46.iss'
+      - '.github/workflows/build-v46-installer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ks-v46-installer
+  cancel-in-progress: false
+
+jobs:
+  build-and-test:
+    name: Compile and smoke-test Inno Setup installer
+    runs-on: windows-2022
+    timeout-minutes: 70
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: 1.0.46
+      EXPECTED_MAIN: AD0436CB37E2797F01B237FC79F40C916E594F51F9376F82B80D9F0C176ED644
+      EXPECTED_UPDATER: B273799152F5F5762872180DF6C28B55F7D5852A4AE3EAF511596D5D1B9B0A00
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch existing GitHub verified 46 release files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force installer/payload | Out-Null
+          gh release download v1.0.46 --repo $env:GITHUB_REPOSITORY --dir installer/payload --pattern 'CarQuoteManager.exe' --pattern 'Updater.exe' --pattern 'SHA256.txt'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot download official 46 release' }
+          $parts = @(
+            @{ File='CarQuoteManager.exe'; Expected=$env:EXPECTED_MAIN },
+            @{ File='Updater.exe'; Expected=$env:EXPECTED_UPDATER }
+          )
+          $manifest = Get-Content installer/payload/SHA256.txt -Raw
+          foreach ($row in $parts) {
+            $path = Join-Path installer/payload $row.File
+            if (!(Test-Path $path)) { throw "Missing $path" }
+            $actual = (Get-FileHash $path -Algorithm SHA256).Hash
+            if ($actual -ne $row.Expected) { throw "Release SHA256 mismatch for $($row.File): $actual" }
+            if (!$manifest.Contains($actual)) { throw "Release SHA manifest missing $($row.File)" }
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $path))
+            if ($bytes[0] -ne 77 -or $bytes[1] -ne 90) { throw "Not a Windows EXE: $path" }
+            Write-Host "Verified official release file: $($row.File) $actual"
+          }
+          [IO.File]::WriteAllText((Join-Path (Resolve-Path installer/payload) 'installed_version.txt'), "1.0.46`n", [Text.UTF8Encoding]::new($false))
+
+      - name: Ensure Inno Setup compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $locations = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $existing = $locations | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$existing) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup package installation failed' }
+          }
+          $compiler = $locations | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$compiler) { throw 'Inno Setup ISCC.exe not found' }
+          "ISCC_PATH=$compiler" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using Inno Setup compiler: $compiler"
+
+      - name: Compile single-file installer exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & $env:ISCC_PATH installer/KS_CarQuote_v46.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compile failed' }
+          if (!(Test-Path dist/KS_CarQuote_v1.0.46_Setup.exe)) { throw 'Installer EXE missing' }
+          $path = (Resolve-Path dist/KS_CarQuote_v1.0.46_Setup.exe).Path
+          $hash = (Get-FileHash $path -Algorithm SHA256).Hash
+          "$hash  KS_CarQuote_v1.0.46_Setup.exe" | Set-Content -Encoding ascii dist/KS_CarQuote_v1.0.46_Setup_SHA256.txt
+          Write-Host "Single installer: $path"
+          Write-Host "Installer SHA256: $hash"
+
+      - name: Install onto a clean Windows user profile and prove data safety
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installRoot = Join-Path $env:LOCALAPPDATA 'CarQuoteManager'
+          $backupRoot = Join-Path $env:LOCALAPPDATA 'CarQuoteManagerBackup'
+          New-Item -ItemType Directory -Force $installRoot,$backupRoot | Out-Null
+          $sentinelA = Join-Path $installRoot 'keep_existing_settings_sentinel.txt'
+          $sentinelB = Join-Path $backupRoot 'keep_existing_backup_sentinel.txt'
+          Set-Content -Encoding ascii $sentinelA 'DO NOT REMOVE MY SETTINGS'
+          Set-Content -Encoding ascii $sentinelB 'DO NOT REMOVE MY BACKUP'
+          $exe = (Resolve-Path dist/KS_CarQuote_v1.0.46_Setup.exe).Path
+          $installLog = Join-Path $env:RUNNER_TEMP 'ks46_setup.log'
+          $args = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/LOG=$installLog")
+          $proc = Start-Process -FilePath $exe -ArgumentList $args -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+             if (Test-Path $installLog) { Get-Content $installLog -Tail 100 }
+             throw "Installer exit code $($proc.ExitCode)"
+          }
+          foreach ($file in @('CarQuoteManager.exe','Updater.exe','installed_version.txt')) {
+             if (!(Test-Path (Join-Path $installRoot $file))) { throw "Installer did not install $file to expected original directory" }
+          }
+          if ((Get-FileHash (Join-Path $installRoot 'CarQuoteManager.exe') -Algorithm SHA256).Hash -ne $env:EXPECTED_MAIN) { throw 'Installed main EXE SHA mismatch' }
+          if ((Get-FileHash (Join-Path $installRoot 'Updater.exe') -Algorithm SHA256).Hash -ne $env:EXPECTED_UPDATER) { throw 'Installed updater SHA mismatch' }
+          $ver = (Get-Content (Join-Path $installRoot 'installed_version.txt') -Raw).Trim()
+          if ($ver -ne '1.0.46') { throw "Installed version wrong: $ver" }
+          if ((Get-Content $sentinelA -Raw).Trim() -ne 'DO NOT REMOVE MY SETTINGS') { throw 'Existing local files modified' }
+          if ((Get-Content $sentinelB -Raw).Trim() -ne 'DO NOT REMOVE MY BACKUP') { throw 'Existing backups modified' }
+          Write-Host 'PASS: per-user fixed install, v1.0.46 EXE, updater and existing data preserved'
+
+      - name: Confirm installed Nuitka EXE reaches Qt startup
+        shell: pwsh
+        timeout-minutes: 7
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $exe = Join-Path $env:LOCALAPPDATA 'CarQuoteManager/CarQuoteManager.exe'
+          $log = Join-Path $env:LOCALAPPDATA 'CarQuoteManager/startup_46.log'
+          $p = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 70; $i++) {
+              Start-Sleep -Seconds 3
+              if (Test-Path $log) {
+                $body = Get-Content $log -Raw -ErrorAction SilentlyContinue
+                if ($body -match 'UNCAUGHT EXCEPTION') { throw 'Installed EXE startup Python exception' }
+                if ($body -match 'QApplication READY') { $ready = $true; break }
+              }
+            }
+            if (!$ready) { throw 'Installed 46 EXE did not reach QApplication READY' }
+            Write-Host 'PASS: installed Windows 46 EXE reaches QApplication READY'
+          } finally {
+            Get-Process -Id $p.Id -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload private workflow artifact for backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: KS-CarQuote-v1.0.46-Single-Installer
+          path: |
+            dist/KS_CarQuote_v1.0.46_Setup.exe
+            dist/KS_CarQuote_v1.0.46_Setup_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Add verified installer to existing v1.0.46 release (never change app updater EXE)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $existing = gh release view v1.0.46 --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[].name'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect official release before upload' }
+          if ($existing -contains 'KS_CarQuote_v1.0.46_Setup.exe') {
+             Write-Host 'Already published installer; refusing to replace existing release asset'
+             exit 0
+          }
+          gh release upload v1.0.46 dist/KS_CarQuote_v1.0.46_Setup.exe dist/KS_CarQuote_v1.0.46_Setup_SHA256.txt --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub installer release upload failed' }
+          gh release view v1.0.46 --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify published release' }
+          Write-Host 'SUCCESS: KS_CarQuote_v1.0.46_Setup.exe published alongside unmodified app updater binary'
